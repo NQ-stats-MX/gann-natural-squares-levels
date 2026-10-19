@@ -1,0 +1,121 @@
+//@version=6
+indicator("Natural Squares", "Nat Sq", overlay=true, max_lines_count=200, max_labels_count=200)
+
+// ---------- Inputs ----------
+rootStep = input.float(1.0, "Root step", options=[1.0, 0.5, 0.25, 0.125, 0.0625], group="Levels", tooltip="1.0 = true natural squares (n²). 0.5 / 0.25 / 0.125 add in-between levels, landing on Square of Nine angles (0.5 = 90°, 0.25 = 45°, 0.125 = 22.5°).")
+nSide    = input.int(4, "Levels each side of price", minval=1, maxval=40, group="Levels")
+scaleMode = input.string("Auto", "Price scale", options=["Auto", "1", "10", "100", "1000", "10000", "100000", "Custom"], group="Levels", tooltip="Price is multiplied by this before taking the square root, then levels are divided back. Auto picks a power of 10 so scaled price is 10,000-99,999 (EURUSD 1.08 → x10000, VIX 20 → x1000, NQ → x1). Use Custom for exotic scales.")
+customScale = input.float(1.0, "Custom scale", minval=0.0001, group="Levels")
+
+ANG_ALL  = "All angles"
+ANG_CARD = "Cardinal only (0/90/180/270)"
+ANG_DIAG = "Cardinal + diagonal (45° steps)"
+angFilter = input.string(ANG_ALL, "Angle filter", options=[ANG_ALL, ANG_CARD, ANG_DIAG], group="Levels", tooltip="Square of Nine angle = (root mod 2) x 180°. Cardinal cross = 0/90/180/270, diagonal cross = the 45° ones. Filtered-out levels are not drawn, not highlighted and do not trigger alerts. Needs Root step 0.5 or smaller to have any effect beyond 0°/180°.")
+
+showWhole = input.bool(true, "Whole-root squares (n²)", inline="w", group="Colors")
+cWhole    = input.color(#F5A623, "", inline="w", group="Colors")
+showFrac  = input.bool(true, "Fractional-root squares", inline="f", group="Colors")
+cFrac     = input.color(color.new(color.gray, 30), "", inline="f", group="Colors")
+hlNearest = input.bool(true, "Highlight nearest above / below", inline="n", group="Colors")
+cNear     = input.color(#31E981, "", inline="n", group="Colors")
+
+lineW   = input.int(1, "Line width", minval=1, maxval=5, group="Style")
+lineSty = input.string("Solid", "Line style", options=["Solid", "Dotted", "Dashed"], group="Style")
+showLbl = input.bool(true, "Show labels", inline="lb", group="Style")
+showPrc = input.bool(true, "Show prices", inline="lb", group="Style")
+showAng = input.bool(true, "Show Square of Nine angle", group="Style")
+showDst = input.bool(true, "Show distance from close (pips on forex, points otherwise)", group="Style")
+showScale = input.bool(true, "Show active price scale (top right)", group="Style")
+lblSize = input.string("Small", "Label size", options=["Tiny", "Small", "Normal"], group="Style")
+
+alertOn = input.bool(false, "Alert when price crosses a square", group="Alerts", tooltip="After enabling, create a new alert and pick this indicator under Condition.")
+
+// ---------- Helpers ----------
+f_style(string s) =>
+    s == "Dotted" ? line.style_dotted : s == "Dashed" ? line.style_dashed : line.style_solid
+
+f_size(string s) =>
+    s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
+
+f_scale(float p) =>
+    float s = 1.0
+    if scaleMode == "Auto"
+        s := p > 0 ? math.pow(10, math.max(0, 4 - math.floor(math.log10(p)))) : 1.0
+    else if scaleMode == "Custom"
+        s := customScale
+    else
+        s := str.tonumber(scaleMode)
+    s
+
+f_angle(float rt) =>
+    (rt % 2.0) * 180.0
+
+f_isMult(float ang, float m) =>
+    float r = ang % m
+    r < 0.0001 or m - r < 0.0001
+
+f_whole(float rt) =>
+    math.abs(rt - math.round(rt)) < 0.000001
+
+f_pass(float rt) =>
+    bool whole = f_whole(rt)
+    float ang = f_angle(rt)
+    bool typeOk = (whole and showWhole) or (not whole and showFrac)
+    bool angOk = angFilter == ANG_ALL or (angFilter == ANG_CARD and f_isMult(ang, 90.0)) or (angFilter == ANG_DIAG and f_isMult(ang, 45.0))
+    typeOk and angOk
+
+// ---------- State ----------
+var array<line>  lines  = array.new<line>()
+var array<label> labels = array.new<label>()
+var table scaleTbl = table.new(position.top_right, 1, 1)
+
+// ---------- Alerts ----------
+float scNow = f_scale(close)
+int kNow  = int(math.floor(math.sqrt(close * scNow) / rootStep))
+int kPrev = int(math.floor(math.sqrt(nz(close[1], close) * scNow) / rootStep))
+if alertOn and kNow != kPrev
+    float rtX = math.max(kNow, kPrev) * rootStep
+    if f_pass(rtX)
+        float lv = rtX * rtX / scNow
+        alert("Price crossed " + (kNow > kPrev ? "above" : "below") + " natural square " + str.tostring(lv, format.mintick), alert.freq_once_per_bar)
+
+// ---------- Drawing ----------
+if barstate.islast
+    while array.size(lines) > 0
+        line.delete(array.shift(lines))
+    while array.size(labels) > 0
+        label.delete(array.shift(labels))
+
+    float sc = f_scale(close)
+    float cs = close * sc
+    float distUnit = syminfo.type == "forex" ? syminfo.mintick * 10 : 1.0
+    string distSfx = syminfo.type == "forex" ? "p" : ""
+    int k0 = int(math.floor(math.sqrt(cs) / rootStep))
+
+    table.cell(scaleTbl, 0, 0, showScale ? "Scale x" + str.tostring(sc, "#.####") : "", text_color=color.gray, text_size=size.small)
+
+    float nearUp = na
+    float nearDn = na
+    for k = k0 - nSide + 1 to k0 + nSide
+        float rt = k * rootStep
+        if rt > 0 and f_pass(rt)
+            float y = rt * rt / sc
+            if y > close and (na(nearUp) or y < nearUp)
+                nearUp := y
+            if y <= close and (na(nearDn) or y > nearDn)
+                nearDn := y
+
+    for k = k0 - nSide + 1 to k0 + nSide
+        float rt = k * rootStep
+        if rt > 0 and f_pass(rt)
+            float y = rt * rt / sc
+            bool whole = f_whole(rt)
+            bool near = hlNearest and (y == nearUp or y == nearDn)
+            color col = near ? cNear : whole ? cWhole : cFrac
+            int w = whole ? lineW + 1 : lineW
+            array.push(lines, line.new(bar_index - 1, y, bar_index, y, extend=extend.both, color=col, width=w, style=f_style(lineSty)))
+            if showLbl
+                string rootTxt = whole ? str.tostring(int(math.round(rt))) : str.tostring(rt, "#.####")
+                float d = (y - close) / distUnit
+                string txt = rootTxt + "²" + (showAng ? "  " + str.tostring(f_angle(rt), "#") + "°" : "") + (showPrc ? "  " + str.tostring(y, format.mintick) : "") + (showDst ? "  (" + (d >= 0 ? "+" : "") + str.tostring(d, "#.#") + distSfx + ")" : "")
+                array.push(labels, label.new(bar_index + 2, y, txt, style=label.style_none, textcolor=col, size=f_size(lblSize)))
